@@ -1,4 +1,4 @@
-"""Read evaluated spreadsheet catalog rows without modifying the catalog document."""
+"""Read catalog rows and perform explicit, undoable spreadsheet entry edits."""
 
 import re
 from pathlib import Path
@@ -49,7 +49,7 @@ def readSheet(sheet):
     return headers, rows
 
 
-def readCatalog(spreadsheet):
+def readCatalog(spreadsheet, allowEmpty=False):
     """Read a selected spreadsheet of any name; all fields are stored directly."""
     if spreadsheet is None or not spreadsheet.isDerivedFrom("Spreadsheet::Sheet"):
         raise ValueError("Select a spreadsheet object for the catalog.")
@@ -66,9 +66,61 @@ def readCatalog(spreadsheet):
             raise ValueError(f"Missing or duplicate PartNumber in {spreadsheet.Label}, row {rowNumber}.")
         partNumbers.add(partNumber)
         entries.append(entry)
-    if not entries:
+    if not entries and not allowEmpty:
         raise ValueError("The catalog contains no parts.")
     return entries
+
+
+def writeEntry(spreadsheet, entry, previousPartNumber=None):
+    """Append or update a row, preserving unchanged formulas and literal identifiers."""
+    values = {}
+    for columnName in COLUMNS:
+        if columnName not in entry or not isinstance(entry[columnName], str):
+            raise ValueError(f"Provide a text value for {columnName}.")
+        values[columnName] = entry[columnName].strip()
+    if not values["PartNumber"]:
+        raise ValueError("PartNumber is required.")
+    entries = readCatalog(spreadsheet, allowEmpty=True)
+    oldEntry = findEntry(entries, previousPartNumber) if previousPartNumber is not None else None
+    if any(existing["PartNumber"] == values["PartNumber"] and existing["PartNumber"] != previousPartNumber for existing in entries):
+        raise ValueError(f"PartNumber '{values['PartNumber']}' already exists in the catalog.")
+    headers, rows = readSheet(spreadsheet)
+    if previousPartNumber is None:
+        populatedRows = [int(match.group(1)) for cellAddress in spreadsheet.getNonEmptyCells()
+                         if (match := re.fullmatch(r"[A-Z]+([1-9][0-9]*)", cellAddress))]
+        rowNumber = max(populatedRows, default=1) + 1
+    else:
+        rowNumber = next(rowNumber for rowNumber, row in rows if row["partnumber"] == previousPartNumber)
+    document = spreadsheet.Document
+    document.openTransaction("Catalog BOM Add Part" if oldEntry is None else "Catalog BOM Change Part Details")
+    try:
+        for columnName, value in values.items():
+            if oldEntry is None or oldEntry[columnName] != value:
+                spreadsheet.set(f"{headers[normalizedHeader(columnName)]}{rowNumber}", "'" + value)
+        document.recompute()
+        readCatalog(spreadsheet, allowEmpty=True)
+        document.commitTransaction()
+    except Exception:
+        document.abortTransaction()
+        raise
+    return values
+
+
+def deleteEntry(spreadsheet, partNumber):
+    """Delete one spreadsheet row; model assignments are intentionally not rewritten."""
+    findEntry(readCatalog(spreadsheet, allowEmpty=True), partNumber)
+    headers, rows = readSheet(spreadsheet)
+    rowNumber = next(rowNumber for rowNumber, row in rows if row["partnumber"] == partNumber)
+    document = spreadsheet.Document
+    document.openTransaction("Catalog BOM Delete Part")
+    try:
+        spreadsheet.removeRows(str(rowNumber), 1)
+        document.recompute()
+        readCatalog(spreadsheet, allowEmpty=True)
+        document.commitTransaction()
+    except Exception:
+        document.abortTransaction()
+        raise
 
 
 def findEntry(entries, partNumber):
@@ -85,7 +137,7 @@ def loadCatalog(application, modelDocument):
     """Resolve the global catalog and keep the consuming model's native dependency."""
     catalogFile, sheetName = preferences.getCatalogSelection(application)
     if not catalogFile and not sheetName:
-        return readCatalog(model.getCatalogSpreadsheet(modelDocument))
+        return readCatalog(model.getCatalogSpreadsheet(modelDocument), allowEmpty=True)
     if not catalogFile or not sheetName:
         raise ValueError("Select a catalog spreadsheet in Settings; the global preference is incomplete.")
     filePath = Path(catalogFile).expanduser().resolve()
@@ -98,7 +150,7 @@ def loadCatalog(application, modelDocument):
         if sourceDocument is None:
             sourceDocument = application.openDocument(str(filePath))
         spreadsheet = sourceDocument.getObject(sheetName) if sourceDocument is not None else None
-        entries = readCatalog(spreadsheet)
+        entries = readCatalog(spreadsheet, allowEmpty=True)
         model.saveCatalogSpreadsheet(modelDocument, spreadsheet)
         return entries
     finally:

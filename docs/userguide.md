@@ -2,11 +2,12 @@
 
 ## Current Capabilities
 
-Catalog BOM provides **Settings**, **Add PartNumber**, and **Lookup PartNumber**
+Catalog BOM provides **Settings**, **Add PartNumber**, **Lookup PartNumber**, and
+**Load Dimensions**
 in its toolbar and menu. It reads your spreadsheet catalog, displays assigned
 catalog entries, and assigns a catalog part number and quantity
-to a selected part or assembly. It does not create or edit catalog files or
-generate a bill of materials yet.
+to a selected part or assembly. The catalog browser can add, edit, and delete
+catalog rows. It does not create catalog files or generate a bill of materials.
 No additional Python packages are required.
 
 ## Catalog Workflow
@@ -22,7 +23,8 @@ Its label and internal name can be anything. Settings chooses the actual sheet
 and remembers its saved filename and internal name as a global preference; label
 changes do not break selection. Models retain native links to the sheet they use.
 Other spreadsheets are ignored.
-Catalog BOM reads the selected sheet without creating or editing catalog cells.
+Catalog BOM reads the selected sheet; its browser also provides explicit row-edit
+commands. Ordinary lookup and assignment do not modify catalog cells.
 Use the following row-1 headers:
 
 | PartNumber | Type | Make | Model | Description | NominalDimensions | Unit |
@@ -34,6 +36,8 @@ punctuation, and columns are mapped by header rather than fixed cell position.
 The picker displays the order above. Values are read directly from the sheet;
 there are no lookup tables or ID joins. PartNumber must be nonempty and unique.
 The other cell values, including Unit, may be blank. Fully blank rows are ignored.
+A sheet containing only the seven headers can be selected and opened in the
+browser to add its first entry.
 Format identifiers as spreadsheet text when leading zeros matter. Spreadsheet
 formulas are read as evaluated values.
 
@@ -117,6 +121,38 @@ integer-constraint quantity properties are also accepted. Expression-driven,
 read-only, or incompatible properties cause an error rather than being replaced.
 Assignments are one undoable document transaction. Save the model to persist them.
 
+### Editing Catalog Entries
+
+The **Add/Change Part Number** browser provides three catalog actions:
+
+- **Add Part** opens a popup containing PartNumber, Type, Make, Model, Description,
+   NominalDimensions, and Unit. Enter a unique, nonempty PartNumber and choose
+   **Save**; the remaining fields may be blank.
+- **Change Part Details** opens the same form for the selected catalog row.
+   Changing its PartNumber requires an additional confirmation.
+- **Delete** removes the selected spreadsheet row after a confirmation dialog
+   that defaults to **No**. It does not delete model objects or rewrite their
+   stored PartNumber assignments.
+
+Change and Delete require a selected row. After adding or changing an entry, the
+browser refreshes, clears its search/filters, and selects the saved row. After
+deleting the final row, the empty browser still allows Add Part.
+
+These actions modify the actual selected spreadsheet document using native
+transactions, separate from the model's **Apply** assignment. Save in the entry
+popup commits its catalog edit in memory, not the catalog file on disk. Save the
+catalog document normally in FreeCAD to persist the changes; undo catalog edits
+in that document. Cancel in the entry popup discards its draft. Cancel in the
+outer assignment browser does not undo catalog changes already saved in a popup
+or a confirmed deletion.
+
+Form input is stored as literal text, preserving leading zeros and preventing a
+description beginning with `=` from becoming a formula. Unchanged existing formula
+cells are preserved. Formulas can still be authored directly in the spreadsheet.
+Renaming or deleting a PartNumber does not cascade into existing model assignments;
+their later lookup can report that the assigned number no longer exists. Reassign
+those objects explicitly when required.
+
 ### Lookup PartNumber
 
 1. Select one supported part or assembly object in the active model document.
@@ -124,15 +160,64 @@ Assignments are one undoable document transaction. Save the model to persist the
 3. The dialog shows just the matching catalog entry's PartNumber, Type, Make,
    Model, Description, NominalDimensions, and Unit as read-only, selectable text.
 4. Choose **Edit** to open **Add/Change Part Number** for this same object.
-5. Applying a change closes the picker and refreshes the lookup details. Cancel
-   leaves the assignment and lookup details unchanged. **Close** dismisses lookup.
+5. Applying an assignment closes the picker and refreshes the lookup details.
+   Cancel leaves the assignment unchanged, but any committed catalog edits still
+   refresh its details. **Close** dismisses lookup.
 
 Lookup matches the stored PartNumber exactly, including case. An unassigned object
 or a number absent from the configured catalog produces an error rather than an
 empty dialog. Assign a number through Add PartNumber first if none is present.
 Lookup itself does not create properties, alter quantity, or modify the catalog.
 Read-only assignment properties can be viewed, but Edit requires editable,
-compatible properties. Edit changes the model's assignment, not catalog cells.
+compatible properties. The picker offers both model assignment and the separate
+catalog actions described above. If the assigned catalog row was renamed or
+deleted, lookup clears stale details and reports the missing PartNumber.
+
+### Load Dimensions
+
+Select a part container in the tree and choose **Load Dimensions**. No catalog or
+PartNumber assignment is needed. The command finds exactly one nested Part Design
+Body, including one inside further part containers or ordinary groups, and creates
+the following properties on the selected source part container:
+
+| Property | Live expression |
+| --- | --- |
+| Length | Body.Tip.Shape.BoundBox.XLength |
+| Width | Body.Tip.Shape.BoundBox.YLength |
+| Height | Body.Tip.Shape.BoundBox.ZLength |
+
+Here Body is the actual nested Body's internal name, and Tip is its current final
+feature. Measuring the final feature excludes the Body's placement: a rotated
+Body can otherwise have a larger axis-aligned bounding box than its stock geometry.
+Properties use FreeCAD's
+unit-aware length type and appear under **Catalog BOM Dimensions** with native
+expression bindings, not copied snapshot values. They update on recompute when
+the Body's final feature changes, including a change to the Body's Tip. Translating
+or rotating the Body, outer part container, or assembly link does not alter these
+final-feature measurements. Length means the final feature's X extent, Width its
+Y extent, and Height its Z extent; the command
+does not automatically choose the longest axis or infer a stud's stock axis.
+
+Selecting an individual assembly link applies the properties to its source part
+container, not to the link instance or Body. All instances share those dimensions.
+If the source is in another file, save that source document to persist the bindings.
+Assemblies, direct Body/feature selections, link arrays, zero or multiple nested
+Bodies, and empty/non-solid Bodies are rejected rather than guessed. Nested
+assemblies and linked child geometry are not used as dimension sources.
+
+Existing compatible Length/Width/Height properties without expressions can be
+bound. Incompatible types, read-only properties, and unrelated expressions are
+preserved and reported as errors. Re-running the command on its existing bindings
+is supported. Existing bindings to Body.Shape.BoundBox are upgraded to the
+placement-independent Body.Tip.Shape.BoundBox expressions when Load Dimensions is
+run again. Creation and binding are one undoable transaction; save the part's
+document normally to persist them. Removing the source Body can break its expressions.
+
+In the built-in Assembly BOM, add property columns named **.Length**, **.Width**,
+and **.Height**, including the leading dot. Recompute or regenerate the BOM to
+pull the properties from part-container rows. The live properties retain exact
+geometry values, while BOM output uses FreeCAD's preferred units and display
+precision and can be rounded. Check those preferences for fabrication dimensions.
 
 ### Supported Selections
 
@@ -180,8 +265,8 @@ Restart FreeCAD after installing the workbench.
 
 1. Start or restart FreeCAD.
 2. Select **Catalog BOM** from the workbench selector.
-3. Confirm its toolbar contains **Settings**, **Add PartNumber**, and
-   **Lookup PartNumber**, then configure the catalog and select a model object.
+3. Confirm its toolbar contains **Settings**, **Add PartNumber**,
+   **Lookup PartNumber**, and **Load Dimensions**, then select a model object.
 
 ## Troubleshooting
 

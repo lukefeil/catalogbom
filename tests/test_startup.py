@@ -30,7 +30,7 @@ class StartupTests(unittest.TestCase):
         gui.Workbench = type("Workbench", (), {"appendToolbar": Mock(), "appendMenu": Mock()})
         gui.addWorkbench = registered.append
         commands = ModuleType("catalogbom.commands")
-        commandNames = ["CatalogBOM_Settings", "CatalogBOM_AddPartNumber", "CatalogBOM_LookupPartNumber"]
+        commandNames = ["CatalogBOM_Settings", "CatalogBOM_AddPartNumber", "CatalogBOM_LookupPartNumber", "CatalogBOM_LoadDimensions"]
         commands.registerCommands = Mock(return_value=commandNames)
 
         with patch.dict(sys.modules, {"FreeCADGui": gui, "catalogbom.commands": commands}):
@@ -56,7 +56,7 @@ class StartupTests(unittest.TestCase):
                     workbench.appendMenu.assert_called_with("Catalog BOM", commandNames)
 
     def test_icon_is_valid_svg(self):
-        for iconName in ("catalogbom.svg", "settings.svg", "lookup.svg"):
+        for iconName in ("catalogbom.svg", "settings.svg", "lookup.svg", "dimensions.svg"):
             with self.subTest(iconName=iconName):
                 icon = ElementTree.parse(ROOT / "Resources" / "icons" / iconName)
                 self.assertEqual(icon.getroot().tag, "{http://www.w3.org/2000/svg}svg")

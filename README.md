@@ -6,9 +6,16 @@ Settings selects a saved spreadsheet as a global FreeCAD workbench preference.
 Each consuming model retains a hidden native link and external dependency when
 applicable. Add PartNumber browses
 that catalog and assigns PartNumber and PartQuantity to a selected part or native
-assembly. Catalog editing and bill-of-materials generation are not implemented.
+assembly. The browser supports Add Part, Change Part Details, and confirmed Delete
+for catalog rows. Catalog file creation and bill-of-materials generation are not
+implemented. Catalog edits are undoable in their document; save that document
+normally to persist them to disk.
 Lookup PartNumber shows the assigned catalog entry; Edit opens the shared
 Add/Change Part Number picker for changing the model's assignment.
+Load Dimensions adds live Length, Width, and Height on a source part container,
+referencing its nested Part Design Body's final feature without including Body or
+outer assembly rotation.
+Use .Length, .Width, and .Height property columns in the native Assembly BOM.
 See the user guide for the supported spreadsheet format and selection rules.
 The selected spreadsheet can have any name, with row-1 headers PartNumber, Type,
 Make, Model, Description, NominalDimensions, and Unit. No lookup sheets are required.
@@ -31,6 +38,7 @@ catalogbom/                    # Installed directly under FreeCAD's Mod director
 |   |-- commands.py             # Toolbar commands and Qt dialogs
 |   |-- model.py                # Document settings and property assignment
 |   |-- preferences.py          # User-wide FreeCAD workbench preference
+|   |-- dimensions.py           # Live nested-Body measurements on part containers
 |   `-- catalog.py              # Spreadsheet catalog reader
 |-- Resources/
 |   `-- icons/catalogbom.svg    # Workbench icon

@@ -7,11 +7,11 @@ import FreeCAD
 import FreeCADGui
 from PySide import QtCore, QtGui, QtWidgets
 
-from catalogbom import catalog, model, preferences
+from catalogbom import catalog, model, preferences, dimensions
 
 
 ICON_FOLDER = Path(__file__).resolve().parent.parent / "Resources" / "icons"
-COMMAND_NAMES = ["CatalogBOM_Settings", "CatalogBOM_AddPartNumber", "CatalogBOM_LookupPartNumber"]
+COMMAND_NAMES = ["CatalogBOM_Settings", "CatalogBOM_AddPartNumber", "CatalogBOM_LookupPartNumber", "CatalogBOM_LoadDimensions"]
 
 
 def showError(error):
@@ -186,7 +186,7 @@ class SettingsDialog(QtWidgets.QDialog):
         try:
             sourceDocument = FreeCAD.listDocuments().get(self.documentCombo.currentData())
             spreadsheet = sourceDocument.getObject(self.sheetCombo.currentData()) if sourceDocument is not None else None
-            catalog.readCatalog(spreadsheet)
+            catalog.readCatalog(spreadsheet, allowEmpty=True)
             preferences.validateCatalogSelection(spreadsheet)
             if self.document is not None and (self.document.FileName or spreadsheet.Document is self.document):
                 model.saveCatalogSpreadsheet(self.document, spreadsheet)
@@ -198,19 +198,89 @@ class SettingsDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class CatalogEntryDialog(QtWidgets.QDialog):
+    """Edit one catalog row; Save modifies the spreadsheet, not the model assignment."""
+
+    def __init__(self, spreadsheet, entry=None, parent=None):
+        super().__init__(parent or FreeCADGui.getMainWindow())
+        self.spreadsheet = spreadsheet
+        self.previousPartNumber = entry["PartNumber"] if entry is not None else None
+        self.savedEntry = None
+        self.setWindowTitle("Change Part Details" if entry is not None else "Add Part")
+        self.resize(580, 360)
+        layout = QtWidgets.QVBoxLayout(self)
+        formLayout = QtWidgets.QFormLayout()
+        self.fieldEditors = {}
+        for columnName in catalog.COLUMNS:
+            value = entry[columnName] if entry is not None else ""
+            if columnName == "Description":
+                fieldEditor = QtWidgets.QPlainTextEdit(value)
+                fieldEditor.setMaximumHeight(100)
+            else:
+                fieldEditor = QtWidgets.QLineEdit(value)
+            self.fieldEditors[columnName] = fieldEditor
+            formLayout.addRow(columnName, fieldEditor)
+        layout.addLayout(formLayout)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
+        self.saveButton = buttons.button(QtWidgets.QDialogButtonBox.Save)
+        self.saveButton.setEnabled(bool(self.fieldEditors["PartNumber"].text().strip()))
+        self.fieldEditors["PartNumber"].textChanged.connect(lambda value: self.saveButton.setEnabled(bool(value.strip())))
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def save(self):
+        values = {columnName: (editor.toPlainText() if isinstance(editor, QtWidgets.QPlainTextEdit) else editor.text())
+                  for columnName, editor in self.fieldEditors.items()}
+        if self.previousPartNumber is not None and values["PartNumber"].strip() != self.previousPartNumber:
+            answer = QtWidgets.QMessageBox.question(
+                self, "Change PartNumber",
+                f"Change '{self.previousPartNumber}' to '{values['PartNumber'].strip()}'? Existing model assignments will not be updated.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No,
+            )
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+        try:
+            self.savedEntry = catalog.writeEntry(self.spreadsheet, values, self.previousPartNumber)
+        except Exception as error:
+            showError(error)
+            return
+        self.accept()
+
+
 class CatalogDialog(QtWidgets.QDialog):
     """Shared assignment picker; only Apply writes PartNumber and PartQuantity."""
 
-    def __init__(self, target, entries):
+    def __init__(self, target, entries, spreadsheet=None):
         super().__init__(FreeCADGui.getMainWindow())
         self.target = target
+        self.entries = entries
+        self.spreadsheet = spreadsheet
+        self.catalogChanged = False
         self.setWindowTitle(f"Add/Change Part Number: {target.Label}")
         self.resize(1000, 600)
         layout = QtWidgets.QVBoxLayout(self)
-        searchEdit = QtWidgets.QLineEdit()
-        searchEdit.setPlaceholderText("Search catalog")
-        searchEdit.setClearButtonEnabled(True)
-        layout.addWidget(searchEdit)
+        self.searchEdit = QtWidgets.QLineEdit()
+        self.searchEdit.setPlaceholderText("Search catalog")
+        self.searchEdit.setClearButtonEnabled(True)
+        layout.addWidget(self.searchEdit)
+        actionsLayout = QtWidgets.QHBoxLayout()
+        self.addButton = QtWidgets.QPushButton("Add Part")
+        self.addButton.setIcon(QtGui.QIcon.fromTheme("list-add", self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)))
+        self.addButton.setEnabled(spreadsheet is not None)
+        self.addButton.clicked.connect(self.addPart)
+        self.changeButton = QtWidgets.QPushButton("Change Part Details")
+        self.changeButton.setIcon(QtGui.QIcon.fromTheme("document-edit", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)))
+        self.changeButton.setEnabled(False)
+        self.changeButton.clicked.connect(self.changePart)
+        self.deleteButton = QtWidgets.QPushButton("Delete")
+        self.deleteButton.setIcon(QtGui.QIcon.fromTheme("edit-delete", self.style().standardIcon(QtWidgets.QStyle.SP_TrashIcon)))
+        self.deleteButton.setEnabled(False)
+        self.deleteButton.clicked.connect(self.deletePart)
+        for actionButton in (self.addButton, self.changeButton, self.deleteButton):
+            actionsLayout.addWidget(actionButton)
+        actionsLayout.addStretch(1)
+        layout.addLayout(actionsLayout)
         self.sourceModel = QtGui.QStandardItemModel(self)
         self.sourceModel.setHorizontalHeaderLabels(catalog.COLUMNS)
         for entry in entries:
@@ -220,8 +290,9 @@ class CatalogDialog(QtWidgets.QDialog):
             self.sourceModel.appendRow(items)
         self.proxyModel = CatalogFilter(self)
         self.proxyModel.setSourceModel(self.sourceModel)
-        searchEdit.textChanged.connect(self.proxyModel.setSearch)
+        self.searchEdit.textChanged.connect(self.proxyModel.setSearch)
         filtersLayout = QtWidgets.QHBoxLayout()
+        self.filterEdits = []
         for columnIndex, columnName in enumerate(catalog.COLUMNS):
             filterEdit = QtWidgets.QLineEdit()
             filterEdit.setPlaceholderText(columnName)
@@ -231,6 +302,7 @@ class CatalogDialog(QtWidgets.QDialog):
                 lambda filterText, columnIndex=columnIndex: self.proxyModel.setColumnFilter(columnIndex, filterText)
             )
             filtersLayout.addWidget(filterEdit)
+            self.filterEdits.append(filterEdit)
         layout.addLayout(filtersLayout)
         self.table = QtWidgets.QTableView()
         self.table.setModel(self.proxyModel)
@@ -269,7 +341,70 @@ class CatalogDialog(QtWidgets.QDialog):
                 break
 
     def updateApply(self, selected, deselected):
-        self.applyButton.setEnabled(bool(self.table.selectionModel().selectedRows()))
+        hasSelection = bool(self.table.selectionModel().selectedRows())
+        self.applyButton.setEnabled(hasSelection)
+        self.changeButton.setEnabled(hasSelection and self.spreadsheet is not None)
+        self.deleteButton.setEnabled(hasSelection and self.spreadsheet is not None)
+
+    def selectedPartNumber(self):
+        selectedRows = self.table.selectionModel().selectedRows()
+        return self.proxyModel.data(self.proxyModel.index(selectedRows[0].row(), 0)) if selectedRows else None
+
+    def reloadEntries(self, selectedPartNumber=None, clearFilters=False):
+        """Refresh shared catalog data after a committed row edit."""
+        self.entries[:] = catalog.readCatalog(self.spreadsheet, allowEmpty=True)
+        self.sourceModel.removeRows(0, self.sourceModel.rowCount())
+        for entry in self.entries:
+            items = [QtGui.QStandardItem(entry[columnName]) for columnName in catalog.COLUMNS]
+            for item in items:
+                item.setEditable(False)
+            self.sourceModel.appendRow(items)
+        if clearFilters:
+            self.searchEdit.clear()
+            for filterEdit in self.filterEdits:
+                filterEdit.clear()
+        for rowIndex in range(self.proxyModel.rowCount()):
+            if self.proxyModel.data(self.proxyModel.index(rowIndex, 0)) == selectedPartNumber:
+                self.table.selectRow(rowIndex)
+                break
+        self.updateApply(None, None)
+
+    def addPart(self):
+        editorDialog = CatalogEntryDialog(self.spreadsheet, parent=self)
+        if editorDialog.exec_() == QtWidgets.QDialog.Accepted:
+            self.catalogChanged = True
+            self.reloadEntries(editorDialog.savedEntry["PartNumber"], clearFilters=True)
+
+    def changePart(self):
+        partNumber = self.selectedPartNumber()
+        if partNumber is None:
+            return
+        try:
+            entry = catalog.findEntry(catalog.readCatalog(self.spreadsheet, allowEmpty=True), partNumber)
+            editorDialog = CatalogEntryDialog(self.spreadsheet, entry, parent=self)
+            if editorDialog.exec_() == QtWidgets.QDialog.Accepted:
+                self.catalogChanged = True
+                self.reloadEntries(editorDialog.savedEntry["PartNumber"], clearFilters=True)
+        except Exception as error:
+            showError(error)
+
+    def deletePart(self):
+        partNumber = self.selectedPartNumber()
+        if partNumber is None:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self, "Delete Catalog Part",
+            f"Delete '{partNumber}' from the catalog? Existing model PartNumber assignments will not be updated.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            catalog.deleteEntry(self.spreadsheet, partNumber)
+            self.catalogChanged = True
+            self.reloadEntries()
+        except Exception as error:
+            showError(error)
 
     def apply(self):
         selectedRows = self.table.selectionModel().selectedRows()
@@ -287,10 +422,11 @@ class CatalogDialog(QtWidgets.QDialog):
 class LookupDialog(QtWidgets.QDialog):
     """Read-only catalog details for one assigned object, with an assignment editor."""
 
-    def __init__(self, target, entries):
+    def __init__(self, target, entries, spreadsheet=None):
         super().__init__(FreeCADGui.getMainWindow())
         self.target = target
         self.entries = entries
+        self.spreadsheet = spreadsheet
         self.setWindowTitle(f"Lookup PartNumber: {target.Label}")
         self.resize(620, 380)
         layout = QtWidgets.QVBoxLayout(self)
@@ -325,9 +461,16 @@ class LookupDialog(QtWidgets.QDialog):
         """Reuse the assignment picker and refresh details only after an accepted edit."""
         try:
             model.validateProperties(self.target)
-            editorDialog = CatalogDialog(self.target, self.entries)
-            if editorDialog.exec_() == QtWidgets.QDialog.Accepted:
-                self.refresh()
+            editorDialog = CatalogDialog(self.target, self.entries, spreadsheet=self.spreadsheet)
+            result = editorDialog.exec_()
+            if result == QtWidgets.QDialog.Accepted or editorDialog.catalogChanged:
+                try:
+                    self.refresh()
+                except ValueError:
+                    for valueLabel in self.valueLabels.values():
+                        valueLabel.clear()
+                    self.valueLabels["PartNumber"].setText(getattr(self.target, "PartNumber", ""))
+                    raise
         except Exception as error:
             showError(error)
 
@@ -364,7 +507,7 @@ class AddPartNumberCommand:
             target = selectedTarget()
             model.validateProperties(target)
             entries = catalog.loadCatalog(FreeCAD, target.Document)
-            CatalogDialog(target, entries).exec_()
+            CatalogDialog(target, entries, spreadsheet=model.getCatalogSpreadsheet(target.Document)).exec_()
         except Exception as error:
             showError(error)
 
@@ -390,7 +533,24 @@ class LookupPartNumberCommand:
                 raise ValueError("The selected object has no assigned PartNumber. Use Add PartNumber first.")
             entries = catalog.loadCatalog(FreeCAD, target.Document)
             catalog.findEntry(entries, target.PartNumber)
-            LookupDialog(target, entries).exec_()
+            LookupDialog(target, entries, spreadsheet=model.getCatalogSpreadsheet(target.Document)).exec_()
+        except Exception as error:
+            showError(error)
+
+
+class LoadDimensionsCommand:
+    """Bind source part dimensions to its nested Body, without requiring a catalog."""
+
+    def GetResources(self):
+        return {"MenuText": "Load Dimensions", "ToolTip": "Load live Length, Width, and Height from the part's nested Body",
+                "Pixmap": str(ICON_FOLDER / "dimensions.svg")}
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        try:
+            dimensions.loadDimensions(selectedTarget())
         except Exception as error:
             showError(error)
 
@@ -400,4 +560,5 @@ def registerCommands():
     FreeCADGui.addCommand(COMMAND_NAMES[0], SettingsCommand())
     FreeCADGui.addCommand(COMMAND_NAMES[1], AddPartNumberCommand())
     FreeCADGui.addCommand(COMMAND_NAMES[2], LookupPartNumberCommand())
+    FreeCADGui.addCommand(COMMAND_NAMES[3], LoadDimensionsCommand())
     return list(COMMAND_NAMES)

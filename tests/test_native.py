@@ -10,7 +10,7 @@ try:
 except ImportError:
     FreeCAD = None
 
-from catalogbom import catalog, model, preferences
+from catalogbom import catalog, model, preferences, dimensions
 
 
 @unittest.skipUnless(FreeCAD is not None, "Requires FreeCAD's bundled Python")
@@ -206,6 +206,243 @@ class NativeTests(unittest.TestCase):
         model.saveCatalogSpreadsheet(self.document, sheet)
         self.assertIs(model.getCatalogSpreadsheet(self.document), sheet)
 
+    def test_live_dimensions_follow_body_not_outer_part_rotation(self):
+        import PartDesign
+
+        container = self.document.addObject("App::Part", "StockPart")
+        innerContainer = self.document.addObject("App::Part", "InnerPart")
+        container.addObject(innerContainer)
+        body = self.document.addObject("PartDesign::Body", "StockBody")
+        innerContainer.addObject(body)
+        stockFeature = body.newObject("PartDesign::AdditiveBox", "Stock")
+        stockFeature.Length = 100
+        stockFeature.Width = 20
+        stockFeature.Height = 3
+        body.Tip = stockFeature
+        self.document.recompute()
+        self.assertIs(dimensions.loadDimensions(container), container)
+        self.assertEqual(tuple(getattr(container, name).Value for name, axis in dimensions.DIMENSION_AXES), (100, 20, 3))
+        self.assertEqual(dict(container.ExpressionEngine)["Length"], "StockBody.Tip.Shape.BoundBox.XLength")
+        self.assertNotIn("Length", body.PropertiesList)
+        container.Placement = FreeCAD.Placement(FreeCAD.Vector(30, 40, 50), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 37))
+        self.document.recompute()
+        self.assertEqual(tuple(getattr(container, name).Value for name, axis in dimensions.DIMENSION_AXES), (100, 20, 3))
+        stockFeature.Length = 125
+        stockFeature.Width = 25
+        self.document.recompute()
+        self.assertEqual(tuple(getattr(container, name).Value for name, axis in dimensions.DIMENSION_AXES), (125, 25, 3))
+        dimensions.loadDimensions(container)
+        self.assertNotIn("Invalid", container.State)
+        instance = self.document.addObject("App::Link", "StockInstance")
+        instance.setLink(container)
+        instance.Placement = FreeCAD.Placement(FreeCAD.Vector(80, 90, 100), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 63))
+        self.assertIs(dimensions.loadDimensions(instance), container)
+        self.assertEqual(tuple(getattr(container, name).Value for name, axis in dimensions.DIMENSION_AXES), (125, 25, 3))
+        import Assembly
+
+        bomObject = self.document.addObject("Assembly::BomObject", "DimensionBOM")
+        bomObject.columnsNames = ["Name", ".Length", ".Width", ".Height"]
+        self.document.recompute()
+        dataRows = sorted({int(cellAddress[1:]) for cellAddress in bomObject.getNonEmptyCells() if cellAddress.startswith("A") and cellAddress[1:].isdigit() and int(cellAddress[1:]) > 1})
+        matchingRows = [rowNumber for rowNumber in dataRows if str(bomObject.get(f"A{rowNumber}")) == container.Label]
+        self.assertTrue(matchingRows)
+        rowNumber = matchingRows[0]
+        for columnLetters, propertyName in zip(("B", "C", "D"), ("Length", "Width", "Height")):
+            exportedValue = FreeCAD.Units.Quantity(str(bomObject.get(f"{columnLetters}{rowNumber}"))).Value
+            formattedValue = FreeCAD.Units.Quantity(getattr(container, propertyName).UserString).Value
+            self.assertAlmostEqual(exportedValue, formattedValue)
+
+    def test_dimensions_ignore_body_placement_and_migrate_old_bindings(self):
+        import PartDesign
+
+        container = self.document.addObject("App::Part", "Shelf")
+        body = self.document.addObject("PartDesign::Body", "ShelfBody")
+        container.addObject(body)
+        stockFeature = body.newObject("PartDesign::AdditiveBox", "ShelfStock")
+        stockFeature.Length = 196.85
+        stockFeature.Width = 285.75
+        stockFeature.Height = 19.05
+        body.Tip = stockFeature
+        body.Placement = FreeCAD.Placement(FreeCAD.Vector(-84.3278, 337.95, 0), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), -25))
+        self.document.recompute()
+        for propertyName, axisName in dimensions.DIMENSION_AXES:
+            container.addProperty("App::PropertyLength", propertyName)
+            container.setExpression(propertyName, f"{body.Name}.Shape.BoundBox.{axisName}")
+        self.document.recompute()
+        self.assertGreater(container.Length.Value, 290)
+        dimensions.loadDimensions(container)
+        for propertyName, expectedValue in zip(("Length", "Width", "Height"), (196.85, 285.75, 19.05)):
+            self.assertAlmostEqual(getattr(container, propertyName).Value, expectedValue)
+        body.Placement.Rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 41)
+        container.Placement.Rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 67)
+        stockFeature.Length = 210
+        self.document.recompute()
+        self.assertAlmostEqual(container.Length.Value, 210)
+        self.assertAlmostEqual(container.Width.Value, 285.75)
+        self.assertAlmostEqual(container.Height.Value, 19.05)
+        extension = body.newObject("PartDesign::AdditiveBox", "ShelfExtension")
+        extension.Length = 225
+        extension.Width = 285.75
+        extension.Height = 19.05
+        extension.Placement = FreeCAD.Placement()
+        body.Tip = extension
+        self.document.recompute()
+        self.assertAlmostEqual(container.Length.Value, 225)
+        self.assertAlmostEqual(container.Width.Value, 285.75)
+        self.assertAlmostEqual(container.Height.Value, 19.05)
+
+    def test_catalog_entry_add_change_delete_and_undo(self):
+        sheet = self.createCatalogSheet(self.document)
+        self.document.UndoMode = 1
+        newEntry = {columnName: "" for columnName in catalog.COLUMNS}
+        newEntry.update(PartNumber="00123", Type="Panel", Description="=2+3", Unit="ea")
+        catalog.writeEntry(sheet, newEntry)
+        entries = catalog.readCatalog(sheet)
+        self.assertEqual(entries[1]["PartNumber"], "00123")
+        self.assertEqual(entries[1]["Description"], "=2+3")
+        self.assertEqual(sheet.getContents("A3"), "'00123")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            catalog.writeEntry(sheet, newEntry)
+        sheet.set("D2", "=2+3")
+        self.document.recompute()
+        originalFormula = sheet.getContents("D2")
+        changedEntry = dict(catalog.findEntry(catalog.readCatalog(sheet), "PN-001"))
+        changedEntry["Description"] = "Changed description"
+        catalog.writeEntry(sheet, changedEntry, previousPartNumber="PN-001")
+        self.assertEqual(sheet.getContents("D2"), originalFormula)
+        self.assertEqual(catalog.readCatalog(sheet)[0]["Description"], "Changed description")
+        catalog.deleteEntry(sheet, "00123")
+        self.assertEqual(len(catalog.readCatalog(sheet)), 1)
+        self.document.undo()
+        self.document.recompute()
+        self.assertEqual(len(catalog.readCatalog(sheet)), 2)
+        catalog.deleteEntry(sheet, "00123")
+        catalog.deleteEntry(sheet, "PN-001")
+        self.assertEqual(catalog.readCatalog(sheet, allowEmpty=True), [])
+        catalog.writeEntry(sheet, newEntry)
+        self.assertEqual(catalog.readCatalog(sheet)[0]["PartNumber"], "00123")
+
+    def test_catalog_browser_add_change_delete_confirmations(self):
+        import FreeCADGui
+        from PySide import QtWidgets
+        from catalogbom import commands
+
+        qtApplication = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        sheet = self.createCatalogSheet(self.document)
+        target = self.document.addObject("App::Part", "Part")
+        model.assignPartNumber(target, "PN-001", 1)
+
+        def addEditor(editorDialog):
+            self.assertEqual(tuple(editorDialog.fieldEditors), catalog.COLUMNS)
+            editorDialog.fieldEditors["PartNumber"].setText("NEW-001")
+            editorDialog.fieldEditors["Type"].setText("Panel")
+            editorDialog.fieldEditors["Description"].setPlainText("New panel")
+            editorDialog.fieldEditors["Unit"].setText("ea")
+            editorDialog.save()
+            return editorDialog.result()
+
+        def changeEditor(editorDialog):
+            self.assertEqual(editorDialog.fieldEditors["PartNumber"].text(), "NEW-001")
+            editorDialog.fieldEditors["Description"].setPlainText("Updated panel")
+            editorDialog.save()
+            return editorDialog.result()
+
+        with patch.object(FreeCADGui, "getMainWindow", return_value=None, create=True):
+            browser = commands.CatalogDialog(target, catalog.readCatalog(sheet), spreadsheet=sheet)
+            browser.show()
+            qtApplication.processEvents()
+            self.assertTrue(browser.addButton.isEnabled())
+            with patch.object(commands.CatalogEntryDialog, "exec_", addEditor):
+                browser.addButton.click()
+            self.assertEqual(browser.selectedPartNumber(), "NEW-001")
+            self.assertEqual(target.PartNumber, "PN-001")
+            with patch.object(commands.CatalogEntryDialog, "exec_", changeEditor):
+                browser.changeButton.click()
+            self.assertEqual(catalog.findEntry(catalog.readCatalog(sheet), "NEW-001")["Description"], "Updated panel")
+            with patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.No) as question:
+                browser.deleteButton.click()
+                self.assertEqual(question.call_args.args[-1], QtWidgets.QMessageBox.No)
+            self.assertEqual(len(catalog.readCatalog(sheet)), 2)
+            with patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.Yes):
+                browser.deleteButton.click()
+            self.assertEqual(len(catalog.readCatalog(sheet)), 1)
+            browser.table.selectRow(0)
+            with patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.Yes):
+                browser.deleteButton.click()
+            self.assertEqual(browser.proxyModel.rowCount(), 0)
+            self.assertFalse(browser.applyButton.isEnabled())
+            self.assertTrue(browser.addButton.isEnabled())
+            with patch.object(commands.CatalogEntryDialog, "exec_", return_value=QtWidgets.QDialog.Rejected):
+                browser.addButton.click()
+            self.assertEqual(catalog.readCatalog(sheet, allowEmpty=True), [])
+            browser.reject()
+            self.assertEqual(target.PartNumber, "PN-001")
+
+    def test_catalog_editor_rejects_duplicates_and_confirms_renames(self):
+        import FreeCADGui
+        from PySide import QtWidgets
+        from catalogbom import commands
+
+        qtApplication = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        sheet = self.createCatalogSheet(self.document)
+        target = self.document.addObject("App::Part", "Part")
+        model.assignPartNumber(target, "PN-001", 1)
+        with patch.object(FreeCADGui, "getMainWindow", return_value=None, create=True), patch.object(commands, "showError") as errorHandler:
+            duplicateEditor = commands.CatalogEntryDialog(sheet)
+            duplicateEditor.fieldEditors["PartNumber"].setText("PN-001")
+            duplicateEditor.save()
+            self.assertIn("already exists", str(errorHandler.call_args.args[0]))
+            self.assertEqual(duplicateEditor.result(), QtWidgets.QDialog.Rejected)
+            self.assertEqual(len(catalog.readCatalog(sheet)), 1)
+            duplicateEditor.reject()
+            editor = commands.CatalogEntryDialog(sheet, catalog.readCatalog(sheet)[0])
+            editor.fieldEditors["PartNumber"].setText("RENAMED")
+            with patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.No):
+                editor.save()
+            self.assertEqual(catalog.readCatalog(sheet)[0]["PartNumber"], "PN-001")
+            with patch.object(QtWidgets.QMessageBox, "question", return_value=QtWidgets.QMessageBox.Yes):
+                editor.save()
+            self.assertEqual(catalog.readCatalog(sheet)[0]["PartNumber"], "RENAMED")
+            self.assertEqual(target.PartNumber, "PN-001")
+
+    def test_lookup_refreshes_catalog_edits_even_when_assignment_is_canceled(self):
+        import FreeCADGui
+        from PySide import QtWidgets
+        from catalogbom import commands
+
+        qtApplication = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        sheet = self.createCatalogSheet(self.document)
+        target = self.document.addObject("App::Part", "Part")
+        model.assignPartNumber(target, "PN-001", 1)
+
+        def changeAndCancel(browser):
+            entry = dict(catalog.readCatalog(sheet)[0])
+            entry["Description"] = "Catalog description updated"
+            catalog.writeEntry(sheet, entry, "PN-001")
+            browser.catalogChanged = True
+            browser.reloadEntries()
+            browser.reject()
+            return browser.result()
+
+        def deleteAndCancel(browser):
+            catalog.deleteEntry(sheet, "PN-001")
+            browser.catalogChanged = True
+            browser.reloadEntries()
+            browser.reject()
+            return browser.result()
+
+        with patch.object(FreeCADGui, "getMainWindow", return_value=None, create=True):
+            lookup = commands.LookupDialog(target, catalog.readCatalog(sheet), spreadsheet=sheet)
+            with patch.object(commands.CatalogDialog, "exec_", changeAndCancel):
+                lookup.editButton.click()
+            self.assertEqual(lookup.valueLabels["Description"].text(), "Catalog description updated")
+            with patch.object(commands.CatalogDialog, "exec_", deleteAndCancel), patch.object(commands, "showError") as errorHandler:
+                lookup.editButton.click()
+                self.assertIn("not found", str(errorHandler.call_args.args[0]))
+            self.assertEqual(lookup.valueLabels["Description"].text(), "")
+            self.assertEqual(target.PartNumber, "PN-001")
+            lookup.reject()
+
     def test_native_catalog_load_settings_and_assignment(self):
         import Spreadsheet
 
@@ -343,7 +580,8 @@ class NativeTests(unittest.TestCase):
         with patch.object(FreeCADGui, "addCommand", create=True) as commandRegistrar:
             self.assertEqual(commands.registerCommands(), commands.COMMAND_NAMES)
             self.assertEqual([call.args[0] for call in commandRegistrar.call_args_list], commands.COMMAND_NAMES)
-            self.assertEqual(commandRegistrar.call_args_list[-1].args[1].GetResources()["MenuText"], "Lookup PartNumber")
+            self.assertEqual(commandRegistrar.call_args_list[2].args[1].GetResources()["MenuText"], "Lookup PartNumber")
+            self.assertEqual(commandRegistrar.call_args_list[3].args[1].GetResources()["MenuText"], "Load Dimensions")
 
     def test_native_link_assignment_is_instance_local(self):
         sourceObject = self.document.addObject("App::Part", "Source")

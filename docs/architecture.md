@@ -3,9 +3,9 @@
 ## Scope And Principles
 
 Catalog BOM is a directory-based Python workbench for FreeCAD. The current
-implementation provides Settings, Add PartNumber, and Lookup PartNumber commands,
-spreadsheet catalog reading, and model property assignments. Catalog editing and BOM generation are
-not implemented.
+implementation provides Settings, Add PartNumber, Lookup PartNumber, and Load Dimensions commands,
+spreadsheet catalog reading/editing, and model property assignments. Catalog file
+creation and BOM generation are not implemented.
 
 Prefer FreeCAD's built-in document and GUI APIs and the Python standard library.
 There are no third-party Python dependencies, build steps, or package installation
@@ -23,8 +23,8 @@ add-ons require explicit support rather than silent inference.
 The catalog is a selected Spreadsheet::Sheet object in the model document or an
 external FreeCAD document. The global selection stores its saved filename and
 internal Name in FreeCAD preferences; consuming models retain a native object
-reference separately. Both labels and sheet counts are unrestricted. No catalog
-creation or editing command is provided.
+reference separately. Both labels and sheet counts are unrestricted. Catalog row
+editing is provided in the browser; catalog file creation is not.
 
 Row 1 contains PartNumber, Type, Make, Model, Description, NominalDimensions, and
 Unit. All seven headers are required, matched ignoring case and punctuation.
@@ -32,7 +32,9 @@ Column positions are resolved from headers; picker order follows this field list
 The reader uses native Spreadsheet APIs to read populated cells and evaluated
 values directly. Lookup sheets and relational joins are no longer used.
 PartNumber must be nonempty and unique; remaining values may be blank. Missing
-headers, duplicate headers, invalid PartNumbers, and empty catalogs are errors.
+headers, duplicate headers, and invalid PartNumbers are errors. Strict readCatalog
+calls reject empty catalogs; Settings, browser loading, and row edits use allowEmpty
+so a header-only sheet can be populated or the final row deleted.
 No SQLite or external database dependency is used.
 
 readCatalog receives the spreadsheet directly. loadCatalog resolves the global
@@ -40,7 +42,8 @@ preference against open files or opens the configured file, parses the selected
 sheet, and binds the consuming model's native link. On failure it closes only new
 documents without dependents, and always restores the active model. With no global
 preference, an existing saved model link is supported for migration. Catalog cells
-are never modified or saved. GUI code captures the target before loading.
+are not modified by ordinary reading or assignment. GUI code captures the target
+and actual spreadsheet reference before opening the browser.
 
 ### Global Preference And Native Dependencies
 
@@ -101,7 +104,7 @@ parent promotion changes the property target.
 
 ### Shared Catalog Picker
 
-Settings, Add PartNumber, and Lookup PartNumber commands are registered lazily
+Settings, Add PartNumber, Lookup PartNumber, and Load Dimensions commands are registered lazily
 during workbench initialization. FreeCAD's bundled PySide Qt bindings provide
 the dialogs.
 The shared picker uses a read-only QStandardItemModel, QTableView, and a custom
@@ -135,6 +138,35 @@ Both writes share one document transaction, which is aborted on failure. Apply
 requires a selected row, writes the target, and closes the picker. Changes become
 persistent when the user saves the model.
 
+### Catalog Row Editing
+
+CatalogDialog receives the actual spreadsheet in addition to its entries and model
+target. Add Part, Change Part Details, and confirmed Delete edit that captured
+sheet, not another file selected later in global preferences. Editing controls
+are disabled for browser instances without a spreadsheet reference.
+
+CatalogEntryDialog exposes all seven fields, with a multiline plain-text
+Description. PartNumber is mandatory and unique; other values may be blank.
+writeEntry validates the current live table, resolves columns from row-1 headers,
+and appends after populated rows or locates an existing row by its original key.
+Changed/new cells use literal-text Spreadsheet.set input; unchanged evaluated
+values skip writes, preserving their existing formula contents and formatting.
+Duplicate keys and missing original rows are rejected. Renaming requires a
+confirmation and never rewrites model assignments.
+
+deleteEntry resolves the live row by key and uses native removeRows with a string
+row address. The GUI requires confirmation, default No. Each operation uses a
+transaction in the spreadsheet's document, recomputes, validates the resulting
+table, and aborts on failure. Native document undo can restore an edited/deleted
+row. No catalog file is automatically saved; persistence is the user's normal
+FreeCAD Save operation.
+
+After committed edits, the browser rebuilds its read-only model and shared entries
+list. Add/Change clear filters and select the saved key; Delete clears selection.
+Assignment Apply/Cancel and catalog Save/Delete are independent transactions.
+Canceling the browser does not roll back already committed catalog edits. No
+catalog edit creates model PartNumber/PartQuantity properties or deletes geometry.
+
 ### Lookup And Edit
 
 LookupPartNumberCommand uses the same selectedTarget helper as assignment, so
@@ -147,9 +179,49 @@ LookupDialog displays only the matching row's seven catalog fields in a scrollab
 read-only form, with selectable, word-wrapped plain-text values. Plain-text mode
 prevents catalog content from being interpreted as rich-text markup.
 Edit validates property compatibility and editability, then opens CatalogDialog
-for the same target and loaded catalog snapshot. Accepted edits refresh the detail
-labels; cancellation leaves the view and object unchanged. Closing lookup does
+for the same target and captured spreadsheet. Accepted assignments or committed
+catalog edits refresh the detail labels, even if the assignment browser is canceled.
+If the key was renamed/deleted, stale fields are cleared and an error is reported.
+Closing lookup does
 not modify either document. Lookup does not create properties or change quantity.
+
+### Live Part Dimensions
+
+dimensions.py owns GUI-independent dimension binding. LoadDimensionsCommand uses
+the common whole-object selection validation, then requires an App::Part classified
+as a part. An individual App::Link is resolved to its source part container; unlike
+PartNumber assignment, dimensions are stored on that source, not on the instance.
+No catalog preference or PartNumber is required for this command.
+
+nestedBody traverses owned part containers and ordinary document groups and requires
+exactly one PartDesign::Body. It does not traverse linked children or assemblies.
+Ambiguous, absent, or empty/non-solid Body sources are rejected before a transaction.
+
+Length, Width, and Height use App::PropertyLength and native expressions referencing
+the Body's internal Name with Tip.Shape.BoundBox.XLength, YLength, and ZLength respectively.
+The target is the part container and the source is the nested Body; expressions
+must not reference the container's synthetic aggregate Shape, which FreeCAD 1.1.4
+does not expose as an expression property. No geometry is copied or transformed.
+The Body's Shape includes its placement, so a rotated Body inflates its axis-aligned
+bounds. Referencing the final feature through Body.Tip.Shape removes that Body
+placement and follows later Tip changes without binding to a particular feature
+name. Body, outer part, and link placements do not affect these final-feature
+extents. Geometry changes still update on recompute. There is no longest-axis
+sorting or automatic stock-axis inference; measurement axes belong to the final
+feature geometry, not the assembled part.
+
+All property types, editor modes, and existing expressions are checked before writes.
+Compatible unbound properties and the command's own bindings are accepted. Previous
+Body.Shape.BoundBox bindings to the same Body/axis are explicitly migrated to
+Body.Tip.Shape.BoundBox on rerun; unrelated
+expressions are not overwritten. Bindings and additions share one transaction,
+which aborts on errors or an invalid target after recompute. Source-document changes
+must be saved by the user. The command does not require a new proxy or observer.
+
+Native Assembly BOM custom columns .Length, .Width, and .Height can extract these
+properties. BOM output follows FreeCAD's unit and precision formatting, rather than
+necessarily retaining full measurement precision. Native tests compare exported
+quantities using FreeCAD.Units against the properties' UserString formatting.
 
 ### Verification Coverage
 
@@ -161,7 +233,15 @@ verify spreadsheet reads, setting persistence, repeated assignment, real links,
 native assembly quantities, filtering, Apply, lookup details, Edit/Cancel refresh,
 lookup errors, read-only Edit rejection, command registration, spreadsheet chooser
 Save/Cancel, browsed-document cleanup, dependency retention, and external-link
-save/reopen after a label rename. Full on-screen workbench startup
+save/reopen after a label rename.
+Additional dimension tests cover property conflicts, rollback, nested Body sourcing,
+Body and outer part/link rotations, live geometry and Tip changes, legacy binding
+migration, and native Assembly BOM property columns. The fix was also validated
+against the supplied Leg.FCStd model in memory; its file checksum was unchanged.
+Catalog editing tests cover literal identifiers, formula preservation, duplicate
+validation, Add/Change forms, rename/delete confirmations, deleting the final row,
+source-document undo, failure rollback, and Lookup refresh after catalog edits.
+Full on-screen workbench startup
 and the user's actual catalog/model remain separate verification requirements.
 
 ## Structure
@@ -175,12 +255,15 @@ and the user's actual catalog/model remain separate verification requirements.
 | `catalogbom/commands.py` | Toolbar handlers, Settings dialog, shared picker, lookup detail dialog. |
 | `catalogbom/model.py` | Internal native dependencies, dependency checks, target classification, transactional writes. |
 | `catalogbom/preferences.py` | Standard FreeCAD user-wide workbench catalog preference. |
+| `catalogbom/dimensions.py` | Source-container selection and live nested-Body dimension expressions. |
 | `catalogbom/catalog.py` | GUI-independent evaluated parsing of the directly linked spreadsheet. |
 | `Resources/icons/catalogbom.svg` | Workbench selector icon. |
 | `Resources/icons/settings.svg` | Settings toolbar icon. |
 | `Resources/icons/lookup.svg` | Lookup PartNumber toolbar icon. |
+| `Resources/icons/dimensions.svg` | Load Dimensions toolbar icon. |
 | `tests/test_startup.py` | Standard-library startup regression tests. |
 | `tests/test_catalog.py` | Catalog and model regressions with simulated APIs. |
+| `tests/test_dimensions.py` | Dimension source, property, and transaction regressions. |
 | `tests/test_native.py` | Optional native FreeCAD and offscreen Qt integration smoke tests. |
 | `.github/workflows/tests.yml` | Runs scaffold checks on Python 3.11 and 3.14. |
 | `.github/copilot-instructions.md` | Shared Copilot role, coding, and documentation rules. |

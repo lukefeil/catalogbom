@@ -244,5 +244,53 @@ class PreferenceTests(unittest.TestCase):
         application.ParamGet.assert_not_called()
 
 
+class CatalogWriteTests(unittest.TestCase):
+    def test_add_requires_unique_nonempty_part_number(self):
+        spreadsheet = makeCatalog()
+        entry = dict(catalog.readCatalog(spreadsheet)[0])
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            catalog.writeEntry(spreadsheet, entry)
+        entry["PartNumber"] = " "
+        with self.assertRaisesRegex(ValueError, "required"):
+            catalog.writeEntry(spreadsheet, entry)
+        spreadsheet.Document.openTransaction.assert_not_called()
+
+    def test_all_seven_fields_must_be_provided(self):
+        spreadsheet = makeCatalog()
+        entry = {"PartNumber": "NEW"}
+        with self.assertRaisesRegex(ValueError, "Type"):
+            catalog.writeEntry(spreadsheet, entry)
+
+    def test_edit_rejects_a_missing_original_row(self):
+        spreadsheet = makeCatalog()
+        entry = dict(catalog.readCatalog(spreadsheet)[0])
+        entry["PartNumber"] = "NEW"
+        with self.assertRaisesRegex(ValueError, "not found"):
+            catalog.writeEntry(spreadsheet, entry, "MISSING")
+        spreadsheet.Document.openTransaction.assert_not_called()
+
+    def test_cell_write_failure_aborts_transaction(self):
+        spreadsheet = makeCatalog()
+        entry = dict(catalog.readCatalog(spreadsheet)[0])
+        entry["PartNumber"] = "NEW"
+        spreadsheet.set.side_effect = RuntimeError("Cell not editable")
+        with self.assertRaises(RuntimeError):
+            catalog.writeEntry(spreadsheet, entry)
+        spreadsheet.Document.abortTransaction.assert_called_once()
+        spreadsheet.Document.commitTransaction.assert_not_called()
+
+    def test_row_delete_failure_aborts_transaction(self):
+        spreadsheet = makeCatalog()
+        spreadsheet.removeRows.side_effect = RuntimeError("Cannot remove row")
+        with self.assertRaises(RuntimeError):
+            catalog.deleteEntry(spreadsheet, "PN-001")
+        spreadsheet.Document.abortTransaction.assert_called_once()
+        spreadsheet.Document.commitTransaction.assert_not_called()
+
+    def test_header_only_catalog_can_be_opened_for_editing(self):
+        spreadsheet = makeSheet("Any sheet", [catalog.COLUMNS])
+        self.assertEqual(catalog.readCatalog(spreadsheet, allowEmpty=True), [])
+
+
 if __name__ == "__main__":
     unittest.main()
