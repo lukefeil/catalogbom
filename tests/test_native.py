@@ -221,6 +221,8 @@ class NativeTests(unittest.TestCase):
         body.Tip = stockFeature
         self.document.recompute()
         self.assertIs(dimensions.loadDimensions(container), container)
+        model.assignPartNumber(container, "STOCK-001", 1)
+        self.assertEqual({container.getGroupOfProperty(name) for name in ("PartNumber", "PartQuantity", "Length", "Width", "Height")}, {"Catalog BOM"})
         self.assertEqual(tuple(getattr(container, name).Value for name, axis in dimensions.DIMENSION_AXES), (100, 20, 3))
         self.assertEqual(dict(container.ExpressionEngine)["Length"], "StockBody.Tip.Shape.BoundBox.XLength")
         self.assertNotIn("Length", body.PropertiesList)
@@ -266,11 +268,12 @@ class NativeTests(unittest.TestCase):
         body.Placement = FreeCAD.Placement(FreeCAD.Vector(-84.3278, 337.95, 0), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), -25))
         self.document.recompute()
         for propertyName, axisName in dimensions.DIMENSION_AXES:
-            container.addProperty("App::PropertyLength", propertyName)
+            container.addProperty("App::PropertyLength", propertyName, "Catalog BOM Dimensions")
             container.setExpression(propertyName, f"{body.Name}.Shape.BoundBox.{axisName}")
         self.document.recompute()
         self.assertGreater(container.Length.Value, 290)
         dimensions.loadDimensions(container)
+        self.assertEqual({container.getGroupOfProperty(name) for name in ("Length", "Width", "Height")}, {"Catalog BOM"})
         for propertyName, expectedValue in zip(("Length", "Width", "Height"), (196.85, 285.75, 19.05)):
             self.assertAlmostEqual(getattr(container, propertyName).Value, expectedValue)
         body.Placement.Rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 41)
@@ -377,6 +380,49 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(catalog.readCatalog(sheet, allowEmpty=True), [])
             browser.reject()
             self.assertEqual(target.PartNumber, "PN-001")
+
+    def test_copy_part_prompts_for_key_then_opens_details(self):
+        import FreeCADGui
+        from PySide import QtWidgets
+        from catalogbom import commands
+
+        qtApplication = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        sheet = self.createCatalogSheet(self.document)
+        originalEntry = dict(catalog.readCatalog(sheet)[0])
+        target = self.document.addObject("App::Part", "Part")
+        model.assignPartNumber(target, "PN-001", 1)
+
+        def copyEditor(dialog):
+            self.assertEqual(len(dialog.findChildren(QtWidgets.QLineEdit)), 1)
+            self.assertEqual(dialog.addButton.text(), "Add")
+            dialog.partNumberEdit.setText("COPY-001")
+            dialog.addButton.click()
+            return dialog.result()
+
+        def detailsEditor(dialog):
+            self.assertEqual(dialog.windowTitle(), "Change Part Details")
+            self.assertEqual(dialog.fieldEditors["PartNumber"].text(), "COPY-001")
+            for columnName in catalog.COLUMNS[1:]:
+                editor = dialog.fieldEditors[columnName]
+                value = editor.toPlainText() if isinstance(editor, QtWidgets.QPlainTextEdit) else editor.text()
+                self.assertEqual(value, originalEntry[columnName])
+            dialog.fieldEditors["Model"].setText("Copy model")
+            dialog.save()
+            return dialog.result()
+
+        with patch.object(FreeCADGui, "getMainWindow", return_value=None, create=True):
+            browser = commands.CatalogDialog(target, catalog.readCatalog(sheet), spreadsheet=sheet)
+            with patch.object(commands.CopyPartDialog, "exec_", copyEditor), patch.object(commands.CatalogEntryDialog, "exec_", detailsEditor):
+                browser.copyButton.click()
+            self.assertEqual(catalog.findEntry(catalog.readCatalog(sheet), "COPY-001")["Model"], "Copy model")
+            self.assertEqual(catalog.findEntry(catalog.readCatalog(sheet), "PN-001"), originalEntry)
+            self.assertEqual(browser.selectedPartNumber(), "COPY-001")
+            self.assertEqual(target.PartNumber, "PN-001")
+            with patch.object(commands.CopyPartDialog, "exec_", return_value=QtWidgets.QDialog.Rejected), patch.object(commands, "CatalogEntryDialog") as detailsFactory:
+                browser.copyButton.click()
+                detailsFactory.assert_not_called()
+            self.assertEqual(len(catalog.readCatalog(sheet)), 2)
+            browser.reject()
 
     def test_catalog_editor_rejects_duplicates_and_confirms_renames(self):
         import FreeCADGui

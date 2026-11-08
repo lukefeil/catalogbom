@@ -248,6 +248,40 @@ class CatalogEntryDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class CopyPartDialog(QtWidgets.QDialog):
+    """Copy one catalog row using only a new PartNumber, without changing its source."""
+
+    def __init__(self, spreadsheet, sourceEntry, parent=None):
+        super().__init__(parent or FreeCADGui.getMainWindow())
+        self.spreadsheet = spreadsheet
+        self.sourceEntry = dict(sourceEntry)
+        self.savedEntry = None
+        self.setWindowTitle("Copy Part")
+        self.resize(440, 130)
+        layout = QtWidgets.QVBoxLayout(self)
+        formLayout = QtWidgets.QFormLayout()
+        self.partNumberEdit = QtWidgets.QLineEdit()
+        formLayout.addRow("New PartNumber", self.partNumberEdit)
+        layout.addLayout(formLayout)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Cancel)
+        self.addButton = buttons.addButton("Add", QtWidgets.QDialogButtonBox.AcceptRole)
+        self.addButton.setEnabled(False)
+        self.partNumberEdit.textChanged.connect(lambda value: self.addButton.setEnabled(bool(value.strip())))
+        buttons.accepted.connect(self.add)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def add(self):
+        entry = dict(self.sourceEntry)
+        entry["PartNumber"] = self.partNumberEdit.text().strip()
+        try:
+            self.savedEntry = catalog.writeEntry(self.spreadsheet, entry)
+        except Exception as error:
+            showError(error)
+            return
+        self.accept()
+
+
 class CatalogDialog(QtWidgets.QDialog):
     """Shared assignment picker; only Apply writes PartNumber and PartQuantity."""
 
@@ -269,6 +303,10 @@ class CatalogDialog(QtWidgets.QDialog):
         self.addButton.setIcon(QtGui.QIcon.fromTheme("list-add", self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)))
         self.addButton.setEnabled(spreadsheet is not None)
         self.addButton.clicked.connect(self.addPart)
+        self.copyButton = QtWidgets.QPushButton("Copy Part")
+        self.copyButton.setIcon(QtGui.QIcon.fromTheme("edit-copy", self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)))
+        self.copyButton.setEnabled(False)
+        self.copyButton.clicked.connect(self.copyPart)
         self.changeButton = QtWidgets.QPushButton("Change Part Details")
         self.changeButton.setIcon(QtGui.QIcon.fromTheme("document-edit", self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)))
         self.changeButton.setEnabled(False)
@@ -277,7 +315,7 @@ class CatalogDialog(QtWidgets.QDialog):
         self.deleteButton.setIcon(QtGui.QIcon.fromTheme("edit-delete", self.style().standardIcon(QtWidgets.QStyle.SP_TrashIcon)))
         self.deleteButton.setEnabled(False)
         self.deleteButton.clicked.connect(self.deletePart)
-        for actionButton in (self.addButton, self.changeButton, self.deleteButton):
+        for actionButton in (self.addButton, self.copyButton, self.changeButton, self.deleteButton):
             actionsLayout.addWidget(actionButton)
         actionsLayout.addStretch(1)
         layout.addLayout(actionsLayout)
@@ -343,6 +381,7 @@ class CatalogDialog(QtWidgets.QDialog):
     def updateApply(self, selected, deselected):
         hasSelection = bool(self.table.selectionModel().selectedRows())
         self.applyButton.setEnabled(hasSelection)
+        self.copyButton.setEnabled(hasSelection and self.spreadsheet is not None)
         self.changeButton.setEnabled(hasSelection and self.spreadsheet is not None)
         self.deleteButton.setEnabled(hasSelection and self.spreadsheet is not None)
 
@@ -374,6 +413,20 @@ class CatalogDialog(QtWidgets.QDialog):
         if editorDialog.exec_() == QtWidgets.QDialog.Accepted:
             self.catalogChanged = True
             self.reloadEntries(editorDialog.savedEntry["PartNumber"], clearFilters=True)
+
+    def copyPart(self):
+        partNumber = self.selectedPartNumber()
+        if partNumber is None:
+            return
+        try:
+            sourceEntry = catalog.findEntry(catalog.readCatalog(self.spreadsheet, allowEmpty=True), partNumber)
+            copyDialog = CopyPartDialog(self.spreadsheet, sourceEntry, parent=self)
+            if copyDialog.exec_() == QtWidgets.QDialog.Accepted:
+                self.catalogChanged = True
+                self.reloadEntries(copyDialog.savedEntry["PartNumber"], clearFilters=True)
+                self.changePart()
+        except Exception as error:
+            showError(error)
 
     def changePart(self):
         partNumber = self.selectedPartNumber()

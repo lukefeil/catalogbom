@@ -123,18 +123,22 @@ Assignments are one undoable document transaction. Save the model to persist the
 
 ### Editing Catalog Entries
 
-The **Add/Change Part Number** browser provides three catalog actions:
+The **Add/Change Part Number** browser provides four catalog actions:
 
 - **Add Part** opens a popup containing PartNumber, Type, Make, Model, Description,
    NominalDimensions, and Unit. Enter a unique, nonempty PartNumber and choose
    **Save**; the remaining fields may be blank.
 - **Change Part Details** opens the same form for the selected catalog row.
    Changing its PartNumber requires an additional confirmation.
+- **Copy Part** prompts only for a new, unique PartNumber. **Add** copies the
+   selected row's remaining values, then immediately opens **Change Part Details**
+   for the new entry. Canceling the initial prompt creates nothing; canceling the
+   details editor leaves the already added copy intact.
 - **Delete** removes the selected spreadsheet row after a confirmation dialog
    that defaults to **No**. It does not delete model objects or rewrite their
    stored PartNumber assignments.
 
-Change and Delete require a selected row. After adding or changing an entry, the
+Copy, Change, and Delete require a selected row. After adding or changing an entry, the
 browser refreshes, clears its search/filters, and selects the saved row. After
 deleting the final row, the empty browser still allows Add Part.
 
@@ -190,7 +194,8 @@ Here Body is the actual nested Body's internal name, and Tip is its current fina
 feature. Measuring the final feature excludes the Body's placement: a rotated
 Body can otherwise have a larger axis-aligned bounding box than its stock geometry.
 Properties use FreeCAD's
-unit-aware length type and appear under **Catalog BOM Dimensions** with native
+unit-aware length type and appear under **Catalog BOM**, alongside PartNumber and
+PartQuantity, with native
 expression bindings, not copied snapshot values. They update on recompute when
 the Body's final feature changes, including a change to the Body's Tip. Translating
 or rotating the Body, outer part container, or assembly link does not alter these
@@ -212,12 +217,28 @@ is supported. Existing bindings to Body.Shape.BoundBox are upgraded to the
 placement-independent Body.Tip.Shape.BoundBox expressions when Load Dimensions is
 run again. Creation and binding are one undoable transaction; save the part's
 document normally to persist them. Removing the source Body can break its expressions.
+Rerunning Load Dimensions also moves existing dimension properties from their
+old category into Catalog BOM without changing their names.
 
 In the built-in Assembly BOM, add property columns named **.Length**, **.Width**,
 and **.Height**, including the leading dot. Recompute or regenerate the BOM to
 pull the properties from part-container rows. The live properties retain exact
 geometry values, while BOM output uses FreeCAD's preferred units and display
 precision and can be rounded. Check those preferences for fabrication dimensions.
+
+Use these exact native Assembly BOM custom-column names, including the leading dot:
+
+| BOM Column | Object Property |
+| --- | --- |
+| .PartNumber | PartNumber |
+| .PartQuantity | PartQuantity |
+| .Length | Length |
+| .Width | Width |
+| .Height | Height |
+
+The standard **Quantity (auto)** column counts assembly occurrences. It differs
+from .PartQuantity, which reads the stored per-object value. The BOM does not
+automatically multiply those columns together.
 
 ### Supported Selections
 

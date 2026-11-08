@@ -141,7 +141,7 @@ persistent when the user saves the model.
 ### Catalog Row Editing
 
 CatalogDialog receives the actual spreadsheet in addition to its entries and model
-target. Add Part, Change Part Details, and confirmed Delete edit that captured
+target. Add Part, Copy Part, Change Part Details, and confirmed Delete edit that captured
 sheet, not another file selected later in global preferences. Editing controls
 are disabled for browser instances without a spreadsheet reference.
 
@@ -153,6 +153,12 @@ Changed/new cells use literal-text Spreadsheet.set input; unchanged evaluated
 values skip writes, preserving their existing formula contents and formatting.
 Duplicate keys and missing original rows are rejected. Renaming requires a
 confirmation and never rewrites model assignments.
+
+CopyPartDialog exposes only a new PartNumber and an Add action. It copies the
+selected live row's other evaluated values through writeEntry, preserving the
+original row, then CatalogDialog selects the new row and opens CatalogEntryDialog
+in edit mode. Canceling that second dialog does not undo the committed copy.
+Copy requires a selected row and uses the existing uniqueness validation.
 
 deleteEntry resolves the live row by key and uses native removeRows with a string
 row address. The GUI requires confirmation, default No. Each operation uses a
@@ -217,11 +223,19 @@ Body.Tip.Shape.BoundBox on rerun; unrelated
 expressions are not overwritten. Bindings and additions share one transaction,
 which aborts on errors or an invalid target after recompute. Source-document changes
 must be saved by the user. The command does not require a new proxy or observer.
+All dimensions use the Catalog BOM property group, matching PartNumber and
+PartQuantity. loadDimensions calls setGroupOfProperty on existing/new dimensions,
+so rerunning it migrates the old Catalog BOM Dimensions category without changing
+property identifiers or expression behavior.
 
 Native Assembly BOM custom columns .Length, .Width, and .Height can extract these
 properties. BOM output follows FreeCAD's unit and precision formatting, rather than
 necessarily retaining full measurement precision. Native tests compare exported
 quantities using FreeCAD.Units against the properties' UserString formatting.
+The complete workbench property-column names are .PartNumber, .PartQuantity,
+.Length, .Width, and .Height. The built-in automatic Quantity counts occurrences
+and is distinct from the custom stored PartQuantity; no implicit multiplication
+is performed.
 
 ### Verification Coverage
 

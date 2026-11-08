@@ -72,7 +72,8 @@ def loadDimensions(target):
     try:
         for propertyName, expressionText in expressions.items():
             if propertyName not in container.PropertiesList:
-                container.addProperty("App::PropertyLength", propertyName, "Catalog BOM Dimensions")
+                container.addProperty("App::PropertyLength", propertyName, "Catalog BOM")
+            container.setGroupOfProperty(propertyName, "Catalog BOM")
             container.setExpression(propertyName, expressionText)
         document.recompute()
         if "Invalid" in container.State:
